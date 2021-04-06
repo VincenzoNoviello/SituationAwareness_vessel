@@ -1,0 +1,226 @@
+--------------------------------------------------------
+Project: datACRON
+Topic: Final dataset of Trajectory Synopses over AIS kinematic messages in Brest area (ver. 0.8)
+CAUTION! This dataset refers to critical points for vessel trajectories only.
+Author: Dimitris Spyrelis (UPRC)
+Date: 17/03/2018
+--------------------------------------------------------
+
+*************************************************
+INPUT (Original dataset: AIS messages from NARI File: ais_brest_positions_raw.csv)
+-------------------------------------------------
+Data provided by NARI (Institut de Recherche de l'École Navale) contains AIS kinematic messages from vessels sailing in the Atlantic Ocean around the port of Brest, Brittany, France and span a period from 1 October 2015 to 31 March 2016. Raw AIS messages was parsed by Cyril Ray (NARI) and has been uploaded into the datAcron FileStore (file: nari_dynamic.csv, 19,035,630 records). 
+
+After deduplication of original AIS messages, this dataset yielded 18,495,677 point locations (kinematic AIS messages only), which was used as input for creating trajectory synopses.
+
+Attribute "MMSI" in the original data is used in processing as the identifier of each vessel (e.g., "244670495").
+
+IMPORTANT: All timestamp values are in milliseconds (UNIX epochs elapsed since 1970-01-01 00:00:00).
+
+
+************
+PROCESSING
+------------ 
+Detection of critical points in trajectory synopses was carried out according to the datAcron Deliverable 2.1 (June 2017).
+
+Software modules were implemented in Scala over Apache Flink 0.10.2 (streaming), simulating admission of the input dataset in chronological order and making all necessary calculations in main memory. Critical points are streamed out in JSON format according to a provisional AVRO schema of attributes (File: critical_point.avsc).
+
+The current version of the code (ver. 0.8) implements I/O using Apache Kafka streams and has applied several rules over mobility features (travelled distance, speed, heading, etc.) per moving object in order to detect critical points along its trajectory. Several online filters for noise elimination over AIS data have been implemented in order to remedy possible imperfections in the raw rurveillance data streams.
+
+In addition to trajectory synopses, a separate stream of NOTIFICATIONS is derived as well. Presently, a notification is being issued upon detection that a vessel has not emitted a message over a given time period T. This period T is a parameter, and is used to identify cases where AIS emission from a vessel has been interrupted at least T time units ago (e.g., the past T=30 minutes). This notification is actually a point location annotated as Start of communication gap, i.e., when AIS emission was interrupted. Naturally, this notification cannot be issued online, but delayed by at least T time units. Therefore, this derived stream of notifications is a complementary, but a distinct outlet with regard to the critical points in the trajectory synopsis. For compatibility, the AVRO attribute schema for notifications is identical to the one used for critical points in synopses (File: critical_point.avsc).
+
+The online detection process is sensitive to parametrization. These results were computed with indicative values in several parameters, which will be further calibrated after consultation with domain experts (our partners in the datAcron maritime use case).
+
+In this experiment, we use the parameters below:
+
+#Compression_parameters
+val_BUFFER_SIZE=5
+val_DISTANCE_THRESHOLD=25.0
+val_ANGLE_THRESHOLD=5.0
+val_GAP_PERIOD=1800
+val_HISTORY_PERIOD=3600
+val_ANGLE_NOISE_THRESHOLD=120.0
+val_SPEED_RATIO=0.25
+val_NO_SPEED_THRESHOLD=0.5
+val_LOW_SPEED_THRESHOLD=5.0
+val_MAX_SPEED_THRESHOLD=50.0
+val_MAX_RATE_OF_CHANGE=50000.0
+val_MAX_RATE_OF_TURN=3.0
+
+
+*****************************************************************
+A1) OUTPUT: TRAJECTORY SYNOPSES (File: ais_brest_synopses.json)
+-----------------------------------------------------------------
+The extracted synopses in JSON format contain 4,684,444 critical points (compression ratio: 74.67% w.r.t. input dataset). 
+
+Annotation of these points (i.e., their characterization as critical w.r.t. mobility) follows the datAcron Task 2.1 specifications, as detailed in the respective AVRO schema (File: critical_point.avsc).
+
+It is important to note that a single critical point may have multiple characterizations (e.g., it may signify a "slow_motion_start" as well as a "change_in_heading").
+
+For each critical point, extra attributes that refer to its instantaneous speed over ground and heading over ground (actually, on the sea surface) are included as computed during the summarization process. Measurement units for speed & heading values may be changed later, depending on particular requirements set by other modules. Additional extra attributes may be included in the output, as long as they can be computed over spatiotemporal features and in real-time.
+
+
+A2) CONVERTED OUTPUT: TRAJECTORY SYNOPSES (File: ais_brest_synopses.csv)
+--------------------------------------------------------------------------
+
+The output dataset of trajectory synopses in JSON has been converted into ASCII comma delimited CSV format with the same number of records.
+
+The following schema of attributes applies to all CSV records (i.e., critical points) in the trajectory synopses:
+
+Attributes in CSV output
+-------------------------
+id          -> unique object identifier (currently, vessel's MMSI)
+timestamp   -> timestamp (UNIX epochs, i.e., milliseconds elapsed since 1970-01-01 00:00:00)
+longitude   -> longitude in decimal degrees (CRS: WGS1984)
+latitude    -> latitude in decimal degrees (CRS: WGS1984)
+annotation  -> characterization (bitmap) of location as critical point
+speed       -> (instantaneous) speed over ground at this location (knots)
+heading     -> (instantaneous) azimuth of movement on the ground (degrees clockwise from North)
+turn        -> From now on, these attributes are maintained by the In-Situ component
+course
+number_of_points
+avg_difference_time
+last_difference_time
+min_difference_time
+max_difference_time
+max_speed
+min_speed
+avg_speed
+variance_speed
+min_longitude
+max_longitude
+min_latitude
+max_latitude
+min_turn
+max_turn
+min_heading
+max_heading
+
+
+Annotation of critical points in the CSV file is condensed to a 8-digit bitmap, where the significance of each bit (0: false; 1: true) from Least Significant Bit to Most Significant Bit is as follows:
+
+Annotation of (MARITIME) critical points in CSV file
+----------------------------------------------------
+00000001 -> stop_start
+00000010 -> stop_end
+00000100 -> slow_motion_start
+00001000 -> slow_motion_end
+00010000 -> gap_end
+00100000 -> change_in_heading
+01000000 -> change_in_speed_start
+10000000 -> change_in_speed_end
+
+As in the original JSON output, a critical point location may be characterized by multiple mobility features so multiple bits in the bitmap could be set for a given critical point. For instance, a vessel may have just taken a turn ("change_in_heading") and also slow down w.r.t. its previous course ("slow_motion_start"), hence two distinct bits must be set to 1 and its annotation becomes 00100100.
+
+
+
+****************************************************************
+B1) OUTPUT: CLEANSED LOCATIONS (File: ais_brest_locations.json)
+----------------------------------------------------------------
+
+The extracted cleansed locations in JSON format contain 16,356,036 points indicating locations which are not excluded as noise.
+
+Annotation of these points is according to the AVRO schema of critical points (File: critical_point.avsc). This stream contains all the locations that are not excluded as noise and may be critical points or non critical points. Note that the location of a critical point of this stream also appears in the trajectory synopses stream as a critical point.
+
+B2) CONVERTED OUTPUT: CLEANSED LOCATIONS (File: ais_brest_locations.csv)
+-------------------------------------------------------------------------
+
+The output dataset of cleansed locations in JSON has been converted into ASCII comma delimited CSV format with the same number of records.
+
+The following schema of attributes applies to all CSV records (i.e., critical points) in the trajectory synopses:
+
+Attributes in CSV output
+-------------------------
+id          -> unique object identifier (currently, vessel's MMSI)
+timestamp   -> timestamp (UNIX epochs, i.e., milliseconds elapsed since 1970-01-01 00:00:00)
+longitude   -> longitude in decimal degrees (CRS: WGS1984)
+latitude    -> latitude in decimal degrees (CRS: WGS1984)
+annotation  -> characterization (bitmap) of location as critical point
+speed       -> (instantaneous) speed over ground at this location (knots)
+heading     -> (instantaneous) azimuth of movement on the ground (degrees clockwise from North)
+turn        -> From now on, these attributes are maintained by the In-Situ component
+course
+number_of_points
+avg_difference_time
+last_difference_time
+min_difference_time
+max_difference_time
+max_speed
+min_speed
+avg_speed
+variance_speed
+min_longitude
+max_longitude
+min_latitude
+max_latitude
+min_turn
+max_turn
+min_heading
+max_heading
+
+
+
+
+
+****************************************************************
+C1) OUTPUT: NOTIFICATIONS (File: ais_brest_notifications.json)
+----------------------------------------------------------------
+
+The extracted notifications in JSON format contain 88,882 points indicating locations where AIS contact with a vessel was lost (i.e., the last reported location before a communication gap started). This information covers MSI 15: No AIS emission/reception (datAcron Deliverable D5.1).
+
+Annotation of these points is according to the AVRO schema of critical points (File: critical_point.avsc). However, only the flag concerning "gap_start" should be taken into consideration w.r.t. notifications; all other annotated flag values should be ignored. Note that the same location may appear in the trajectory synopses as a critical point; so, information about all other mobility features (stop, change in heading, etc.) should be extracted from the stream of trajectory synopses.
+
+
+C2) CONVERTED OUTPUT: NOTIFICATIONS (File: ais_brest_notifications.csv)
+-------------------------------------------------------------------------
+
+The output dataset of notifications in JSON has been converted into ASCII comma delimited CSV format with the same number of records.
+
+The following schema of attributes applies to all CSV records (i.e., critical points) in the trajectory synopses:
+
+Attributes in CSV output
+-------------------------
+id          -> unique object identifier (currently, vessel's MMSI)
+timestamp   -> timestamp (UNIX epochs, i.e., milliseconds elapsed since 1970-01-01 00:00:00)
+longitude   -> longitude in decimal degrees (CRS: WGS1984)
+latitude    -> latitude in decimal degrees (CRS: WGS1984)
+annotation  -> characterization (bit) of location as notification (1: Start of communication gap)
+speed       -> (instantaneous) speed over ground at this location (knots)
+heading     -> (instantaneous) azimuth of movement on the ground (degrees clockwise from North)
+id          -> unique object identifier (currently, vessel's MMSI)
+timestamp   -> timestamp (UNIX epochs, i.e., milliseconds elapsed since 1970-01-01 00:00:00)
+longitude   -> longitude in decimal degrees (CRS: WGS1984)
+latitude    -> latitude in decimal degrees (CRS: WGS1984)
+annotation  -> characterization (bitmap) of location as critical point
+speed       -> (instantaneous) speed over ground at this location (knots)
+heading     -> (instantaneous) azimuth of movement on the ground (degrees clockwise from North)
+turn        -> From now on, these attributes are maintained by the In-Situ component
+course
+number_of_points
+avg_difference_time
+last_difference_time
+min_difference_time
+max_difference_time
+max_speed
+min_speed
+avg_speed
+variance_speed
+min_longitude
+max_longitude
+min_latitude
+max_latitude
+min_turn
+max_turn
+min_heading
+max_heading
+
+REFERENCES
+------------
+Original AIS dataset (source: NARI): 
+/Users/aiserver/Documents/datAcron/WP5/Data/Training Dataset (Brest)/[P1] AIS Data/NARI (final)/nari_dynamic.zip
+
+datAcron Deliverable D5.1: Maritime Use Case description.  Version 1.1, dissemination date: 01/04/2016, available at datAcron FileStore: \\pincloud6.ted.unipi.gr\datAcron\WP5\Deliverables\Final\datACRON_D5.1.pdf
+
+datAcron Deliverable D2.1: Cross-streaming, real-time detection of moving object trajectories (interim). Due date: 14/7/2017, currently available at datAcron FileStore: 
+\\pincloud6.ted.unipi.gr\datAcron\WP2\Deliverables\D2.1\Drafts\D2.1-draft2-20170707.pdf
+
